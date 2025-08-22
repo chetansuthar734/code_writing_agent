@@ -80,7 +80,7 @@ llm_with_tools = llm.bind_tools(tools=[pythone],tool_choice=["pythone"])
 
 
 class State(TypedDict, total=False):
-    messages: List[BaseMessage]              # Required input
+    messages: List[BaseMessage]              # input
     user_input: Optional[str]
     new_input: Optional[str]
     iterations: Optional[int]
@@ -186,11 +186,7 @@ graph = agent_builder.compile()
 
 
 
-# # question = """From the dataset located at: "13100326.csv", 
-# # Explore the relationship between glucose levels and glycated hemoglobin A1c (HbA1c) percentages within specific age groups. 
-# # Identify any correlations or patterns between these two key indicators of blood sugar control."""
-
-# question = "function for varible  a and b , return variable sum"
+# question = "function for two variable  a and b , return variable sum"
 # question = "python function add two variable and run"
 
 # solution = graph.invoke({"user_input": question, "messages":[], "iterations": 0, "new_input": "True"})
