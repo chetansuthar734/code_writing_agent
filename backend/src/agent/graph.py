@@ -46,7 +46,7 @@ class State(TypedDict):
     Represents the state of the Graph.
     """
     messages:List[BaseMessage] #
-    user_input: str  # User’s task request
+    user_input: BaseMessage  # User’s task request
     workspace: List   # Chat history (questions, responses, tool outputs)
     new_input: str   # Flag to check for new user input
     code: str        # Stores the generated Python code
@@ -127,7 +127,7 @@ def llm_call(state: State):
 
 # %%
 def entry(state:IOState)->State:
-    user_input = state['messages'][-1].content
+    user_input = state['messages'][-1]
     return {"user_input": user_input, "workspace":[], "iterations": 0, "new_input": "True"} 
 
 # %%
