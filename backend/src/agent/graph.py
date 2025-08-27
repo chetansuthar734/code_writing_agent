@@ -4,7 +4,7 @@
 # %%
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from typing_extensions import Literal ,Annotated ,List
+from typing_extensions import Literal ,Annotated ,List,TypedDict
 from langgraph.graph import StateGraph,END,START,add_messages
 from langchain_core.messages import SystemMessage, HumanMessage,ToolMessage,BaseMessage ,AIMessage
 from langchain_core.tools import Tool
