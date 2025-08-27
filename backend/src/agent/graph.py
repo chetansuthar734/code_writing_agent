@@ -1,196 +1,181 @@
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import StateGraph, END,START ,MessagesState 
-from langchain_core.messages import SystemMessage, HumanMessage,AIMessage,ToolMessage ,BaseMessage
-from typing import TypedDict, List,Annotated ,Literal 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.config import get_stream_writer
-import time
-from langchain.prompts import ChatPromptTemplate
-from uuid import uuid4
-from pydantic import BaseModel, Field 
-from langchain_core.tools import tool
+# %% [markdown]
+# code agent with human in loop
 
+# %%
+from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from typing_extensions import Literal ,Annotated ,List
+from langgraph.graph import StateGraph,END,START,add_messages
+from langchain_core.messages import SystemMessage, HumanMessage,ToolMessage,BaseMessage ,AIMessage
 from langchain_core.tools import Tool
 from langchain_experimental.utilities import PythonREPL
-# from langchain_core.messages import BaseMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
+from uuid import uuid4
 
-from typing import TypedDict, List, Optional
-from langchain_core.messages import BaseMessage
-
-
-
-
-
-llm = ChatGoogleGenerativeAI(model='gemini-2.0-flash',api_key="AIzaSyBABn5Xb0fbtwmagpA-9H0Z9M5h6yWvvGk")
-
-
-
-
-max_iters=3
-
-
-python_env = PythonREPL()
-# result =python_repl.run("print(\"hello world\")")
-# # print(result)
-
-
-# # You can create the tool to pass to an agent
-python_repl = Tool(
-    name="python_repl",
-    description="A Python shell. Use this to execute python commands. Input should be a valid python command. If you want to see the output of a value, you should print it out with `print(...)`.",
-    func=python_env.run,
-)
-
-
-# print(python_repl.invoke("python print('hello world')"))
-# print(python_repl.invoke('''python print(55)'''))
-
-
+max_iters=2
 
 @tool
-def pythone(code:str):
-    """use this function to execute python code and get results
-        Args:
-    code:str = only python code 
-        """
-    try: 
-        result = python_repl.invoke(code)
-        # print(result)
+def python_repl(code: str) -> str:
+    """
+    Use this function to execute Python code and get the results.
+    """
+    repl = PythonREPL()
+    try:
+        print("Running the Python REPL tool")
+        print(code)
+        result = repl.run(code)
+        print("result")
+        print(result)
     except BaseException as e:
-        return f"failed to execution error:{e}"
+        return f"Failed to execute. Error: {e!r}"
+    
+    return result
 
-    return f"result of code execution {result}"
 
-
-
-tools = [pythone]
+# %%
+llm = ChatGoogleGenerativeAI(model='gemini-2.0-flash',api_key="AIzaSyDK1CNcAhSrM4qy3UVIXLu7J7Qk2U51Rug")
+tools = [python_repl]
 tools_by_name = {tool.name: tool for tool in tools}
-# print(pythone.invoke("print(55)"))
 
-llm_with_tools = llm.bind_tools(tools=[pythone],tool_choice=["pythone"])
+llm_with_tools = llm.bind_tools(tools)
 
-# result = llm_with_tools.invoke('a python code for simple OOP class and object')
-# exect = pythone.invoke(result.tool_calls[0]['args']['code'])
-# print(exect)
-# import pprint
-# pprint.pprint(result.tool_calls[0]['args'])
+llm.invoke('hi')
+
+# %%
+class State(TypedDict):
+    """
+    Represents the state of the Graph.
+    """
+    messages:List[BaseMessage] #
+    user_input: str  # User’s task request
+    workspace: List   # Chat history (questions, responses, tool outputs)
+    new_input: str   # Flag to check for new user input
+    code: str        # Stores the generated Python code
+    iterations: int  # Tracks the number of execution attempts
+    final_response: List  # Stores the final response after execution
+
+# code and new_input use for human in loop input  and code store
 
 
+class IOState(TypedDict):
+    messages:List[BaseMessage]
 
-
-class State(TypedDict, total=False):
-    messages: List[BaseMessage]              # input
-    user_input: Optional[str]
-    new_input: Optional[str]
-    iterations: Optional[int]
-    code_output: Optional[str]
-    final_response: Optional[List[str]]
-
+# %%
 
 def tool_node(state: State):
     """Performs the tool call"""
-    # print("-----tool_node-----")
     result = []
-    messages = state["messages"] or []
-    
-    for tool_call in state["messages"][-1].tool_calls:
+    workspace = state["workspace"]
+    code =[]
+
+    for tool_call in workspace[-1].tool_calls:
         tool = tools_by_name[tool_call["name"]]
         observation = tool.invoke(tool_call["args"])
+
+        code.append(ToolMessage(name = 'code',content=tool_call['args']['code'],additional_kwargs={'output':observation},tool_call_id=tool_call['id']))
+        print("code",tool_call['args']['code'])
         result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
-    return {"messages": messages + result}
 
 
+    return {"workspace": workspace + result,"messages":code}
 
-
-
-def should_continue(state:State) -> Literal["environment", END]:
+# %%
+def should_continue(state: State) -> Literal["tool_node", END]:
     """
     Decide if we should continue execution or stop.
     """
-    messages = state.get("messages",[])
-    last_message = messages[-1] 
-    iterations = state.get("iterations",0) or  0
+    workspace = state["workspace"]
+    last_message = workspace[-1]
+    iterations = state["iterations"]
     
     if iterations > max_iters:
         return END  # Stop execution if max iterations are reached
     if last_message.tool_calls:
-        return "environment"  # Continue execution if the LLM made a tool call
+        return "tool_node"  # Continue execution if the LLM made a tool call
     return END
 
-
-
-
-
-
+# %%
 def llm_call(state: State):
     """
     The LLM agent node. Generates code, calls tools, and analyzes results.
     """
-    # # print("----- Calling LLM -----")
+    print("----- Calling LLM -----")
+    workspace = state["workspace"]
+    user_input = state["user_input"]
+    iterations = state["iterations"]
+    new_input = state["new_input"]
 
-    # # user_input = state["user_input"] 
-    # user_input = state["messages"]  or  []
-    # iterations = state.get("iterations",0) or [] 
-    # new_input = state["new_input"]  or "True"
-    messages = state.get("messages", [])
-    user_input = state.get("messages", [])
-    iterations = state.get("iterations", 0)
-    new_input = state.get("new_input", "True")
-
-    # if len(messages) == 0:
-    #     messages += [
-    #         SystemMessage(content="""You are a Python coding assistant with expertise in exploratory data analysis.
-    #         Use the python_repl tool to execute the code. If an error occurs, resolve it and retry up to 3 times.
-    #         Once execution succeeds, analyze the result and provide insights.
-    #         Structure responses with a prefix, code block, result, and analysis."""
-    #         )
-    #     ]
+    if len(workspace) == 0:
+        workspace += [
+            SystemMessage(content="""You are a Python coding assistant with expertise in exploratory data analysis.
+            Use the python_repl tool to execute the code. If an error occurs, resolve it and retry up to 3 times.
+            Once execution succeeds, analyze the result and provide insights.
+            Structure responses with a prefix, code block, result, and analysis."""
+            )
+        ]
     
     if new_input == "True": 
-        messages += [
-            HumanMessage(content=f"write only python code {user_input} , format should be '''import dependencies \n\n code only''' with run function , not use: if __name__=='__main__'. necessary  making A Python REPL tool_calls ")
+        workspace += [
+            HumanMessage(content=f"The user wants to complete this task: {user_input}. Use the Python REPL tool to complete the task.")
         ]
         new_input = "False"
                 
-    code_solution = llm_with_tools.invoke(messages)
-    # print(code_solution)
-    # print("code tool call :",code_solution.tool_calls)
-    messages += [(code_solution)]
+    code_solution = llm_with_tools.invoke(workspace)
+    workspace += [(code_solution)]
     
     iterations += 1
-    return {"messages": messages ,"final_response":code_solution.tool_calls[-1]['args']['code'], "iterations": iterations, "new_input": new_input}
+    return {"workspace": workspace, "final_response": code_solution, "iterations": iterations, "new_input": new_input}
 
+# %%
+def entry(state:IOState)->State:
+    user_input = state['messages'][-1].content
+    return {"user_input": user_input, "workspace":[], "iterations": 0, "new_input": "True"} 
 
-
-
-agent_builder = StateGraph(State)
+# %%
+agent_builder = StateGraph(State,input_schema=IOState,output_schema=IOState)
 
 # Add nodes
+agent_builder.add_node("entry", entry)
 agent_builder.add_node("llm_call", llm_call)
-agent_builder.add_node("environment", tool_node)
+agent_builder.add_node("tool_node", tool_node)
 
 # Add edges
-agent_builder.add_edge(START, "llm_call")
+agent_builder.add_edge(START, "entry")
+agent_builder.add_edge("entry", "llm_call")
 agent_builder.add_conditional_edges(
     "llm_call",
     should_continue,
     {
-        "environment": "environment",
+        "tool_node": "tool_node",
         END: END
     }
 )
-
-agent_builder.add_edge("environment", "llm_call")
+agent_builder.add_edge("tool_node", "llm_call")
 graph = agent_builder.compile()
 
 
+# from IPython.display import display , Image
+# display(Image(graph.get_graph().draw_mermaid_png()))
 
-# question = "function for two variable  a and b , return variable sum"
-# question = "python function add two variable and run"
+# # %%
+# question = """make python obeject oriented class code for student infomation store name ,roll_no.,mobile_no."""
 
-# solution = graph.invoke({"user_input": question, "messages":[], "iterations": 0, "new_input": "True"})
-# print("\n\n")
-# print(solution['final_response'])
+# solution = graph.invoke({'messages':[HumanMessage(content=question)]})
+
+# %%
+# import pprint
+
+
+# code = solution['messages'][0].content
+# code_out = solution['messages'][0].additional_kwargs
+# pprint.pprint(code)
+# pprint.pprint(code_out)
+
+# # %%
+# from langchain_experimental.utilities import PythonREPL
+# repl = PythonREPL()
+# repl.run(code)
+
+# # %%
+
 
 
